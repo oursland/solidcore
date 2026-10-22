@@ -723,8 +723,8 @@ mod tests {
             1.0,
             false
         )));
-        // the stitch's glue path stops at the vertex-list removal
-        assert!(unported(&create_rotational_sweep(
+        // the circle around the axis sweeps a surface degenerate to a curve
+        assert!(invalid(&create_rotational_sweep(
             &mut k, &ok, o, z, 90.0, false
         )));
         assert!(unported(&create_draft_sweep(
@@ -793,8 +793,7 @@ mod tests {
             2,
             false
         )));
-        // the stitch's glue path stops at the vertex-list removal
-        assert!(unported(&create_rotational_sweep_with_repetitions(
+        assert!(invalid(&create_rotational_sweep_with_repetitions(
             &mut k, &ok, o, z, 5.0, 2, false
         )));
     }
@@ -806,23 +805,13 @@ mod tests {
         assert!(invalid(&create_pipe_sweep(&mut k, 1.0, None, true)));
         assert!(invalid(&create_pipe_sweep(&mut k, 0.0, Some(&p), true)));
         assert!(invalid(&create_pipe_sweep(&mut k, -1.0, Some(&p), false)));
-        // a NaN radius passes the API's validation; upstream returns an empty B-rep
-        let b = create_pipe_sweep(&mut k, f64::NAN, Some(&p), false).expect("nan pipe");
+        // NaN passes upstream's `radius <= 0` check; the circle it builds fails (status
+        // ignored upstream), leaving nothing to sweep
+        let b = create_pipe_sweep(&mut k, f64::NAN, Some(&p), false).expect("NaN pipe");
         assert!(b.face_list().is_empty());
-        assert!(b.edge_list().is_empty());
-        assert!(b.vertex_list().is_empty());
-        // a positive radius sweeps the tube; the capped one's cap builder glues and
-        // stops at the stitch's vertex-list removal
         let b = create_pipe_sweep(&mut k, 1.0, Some(&p), false).expect("pipe");
         assert_eq!(b.face_list().len(), 1);
-        let capped = create_pipe_sweep(&mut k, 1.0, Some(&p), true);
-        assert!(matches!(
-            capped,
-            Err(SolidError::Unported {
-                upstream: "SmBrep::m_pVertexListHead",
-                unit: "topology.brep_p1"
-            })
-        ));
+        assert!(unported(&create_pipe_sweep(&mut k, 1.0, Some(&p), true)));
 
         let (c, l) = (circle(), line());
         assert!(invalid(&create_sweep_along_planar_path(

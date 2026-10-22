@@ -1167,7 +1167,7 @@ pub fn glue_with_notifications(
         remove_vertexuse(b, deleted, vu)?;
         post_insert_vertexuse(b, survivor, vu)?;
     }
-    remove_owned_vertex(b, deleted)?;
+    remove_owned_vertex(b, deleted);
     destroy_topology_record(b, crate::error::EntityRef::Vertex(deleted))?;
     if let Some(first) = first.filter(|&first| first != last) {
         if let Some(vu) = shell_vertexuse(b, last)? {
@@ -1319,12 +1319,9 @@ fn transfer_shell_children(
     let wires: Vec<_> = wire_edges.iter().copied().map(Some).collect();
     crate::topology::shell::transfer_children(k, b, source, target, Some(&wires))
 }
-fn remove_owned_vertex(_b: &mut Brep, _vertex: VertexId) -> Result<()> {
-    // UNPORTED(topology.brep_p1): SmBrep::m_pVertexListHead
-    // Completing the glue (the record removal subsumes the list edit) exposes real
-    // Rust-vs-C++ differences in the shell-vertex path: heal.stitch_p2's
-    // TestSmStitchIntoShell cases gain an extra edge (plan/findings.md).
-    missing("SmBrep::m_pVertexListHead", "topology.brep_p1")
+/// `m_pVertexListHead->Remove(pVertexToDelete)`.
+fn remove_owned_vertex(b: &mut Brep, vertex: VertexId) {
+    b.remove_from_vertex_list(vertex);
 }
 
 /// Outputs of `MakeEdgeInFace`, initialized to null after its editing and face checks.
@@ -2066,11 +2063,9 @@ pub fn initial_stitch_tolerance(brep_tolerance: f64, requested: f64) -> f64 {
 /// Stitches twice if needed, then orients surfaces. No success is manufactured
 /// from the statuses ignored upstream when a required callee is missing.
 ///
-/// The stitch passes run outside an edit of their own: the stitch's glue and squeeze
-/// helpers notify through their own kernel-context edits
-/// ([`crate::topology::brep::p3::with_kernel_callbacks`]), which the guard refuses
-/// inside another edit, and upstream's `SmBrep::StitchFaces` has no edit scope to
-/// nest. Only the orientation pass needs the caller's notification environment.
+/// The stitches run on the kernel's context: the stitcher's own edits (glue,
+/// squeeze) each lend its callbacks for themselves, which a surrounding
+/// [`plain_edit`] would refuse as nested. Only the orientation runs under one.
 pub fn stitch_and_orient(
     k: &mut Kernel,
     b: &mut Brep,
@@ -2107,8 +2102,7 @@ pub fn stitch_and_orient(
             true,
             options.just_unify.unwrap_or(lamina > 0),
             options.faces_to_swap.as_deref(),
-        ))?;
-        Ok(())
+        ))
     })
 }
 
