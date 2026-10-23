@@ -372,6 +372,18 @@ fn main() -> ExitCode {
                 res.deferred()
             );
             if !ok {
+                for c in res
+                    .cases
+                    .iter()
+                    .filter(|c| c.perturbed.is_some() && !c.fail())
+                {
+                    println!(
+                        "  uncaught perturbation {} [{}] ({})",
+                        c.name,
+                        c.source.describe(),
+                        c.perturbed.unwrap_or("")
+                    );
+                }
                 failed += 1;
             }
             continue;
