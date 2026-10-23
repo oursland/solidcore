@@ -290,10 +290,11 @@ checks, run on every unit that does not already fail, close that gap
   only gets the value-share check.
 * **Value share** (always on, also in `--status-of`): at least 75% of a unit's
   passing cases, and at least one, must compare a value (float, integer or
-  topology entry), not only an error string both sides agreed on. Units already
-  below the floor on main carry a reviewed `value-share` waiver (currently
-  `query.face_p3` and `boolean.merge_p3`); replacing their status-only passes
-  with success-path comparisons is generator work, not a floor change.
+  topology entry), not only an error string both sides agreed on. When this
+  floor was set, every green/partial unit passed it; a unit that does not needs
+  more success-path comparisons in its generator, not a lower floor. A reviewed
+  exception needs a `value-share` waiver with a reason in
+  `plan/difftest-waivers.toml` (none at present).
 
 Reports record `exact_compared` (integer/topology comparisons) per case when
 nonzero, so the ratchet can tell integer-only cases that compared something. A

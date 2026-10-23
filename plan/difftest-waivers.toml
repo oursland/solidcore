@@ -1,22 +1,14 @@
 # Accepted difftest regression-gate violations (crates/difftest/README.md, "Regression gate").
-# Every entry needs a reason a reviewer can check. Remove ratchet waivers once the PR
-# that needed them has merged (the base commit's reports then no longer contain the case).
+# Every entry needs a reason a reviewer can check. Add an entry only for a reviewed
+# exception, never to get a unit green. Remove ratchet waivers once the PR that needed
+# them has merged (the base commit's reports then no longer contain the case).
+#
+# No violations are waived at present. The two units that were below the value-share
+# floor when this gate was first proposed (query.face_p3 and boolean.merge_p3) now pass
+# it once integer/topology comparisons are counted (765/1000 and 271/361 on 2026-10-23).
 #
 # [[waiver]]
 # unit = "nlib.knots"
 # check = "ratchet"          # or "value-share"
 # case = "insert_at_end"     # ratchet only; omit to waive every case of the unit
 # reason = "fixture asserted the pre-#123 clamp; replaced by insert_at_end_clamped"
-
-# Existing coverage on main (measured 2026-10-23 against main's reports): most passes
-# here agree on a status rather than a value. Rewriting these generators to reach more
-# success paths is separate work; the floor stays at 75%.
-[[waiver]]
-unit = "query.face_p3"
-check = "value-share"
-reason = "Only CalculateTightBoundingBox and SectorClassifyCurveOn yield compared values; sm_FaceClassifyUVLine and sms_FindAndClassifyLoopBisector are reached only through deferred callers, and most fixture passes are inexact-geometry imports, rejected fixtures or the same status (unit notes)."
-
-[[waiver]]
-unit = "boolean.merge_p3"
-check = "value-share"
-reason = "Successful merges need merge_p2/p4 wiring (the unit notes: zero geometric-success comparisons); most passing cases are native error statuses or guard refusals by design."
