@@ -4,7 +4,7 @@ name: Nightly difftest
 # * `--fuzz` on every green or partial unit (probes the FFI guards for crashes, panics
 #   and hangs; see crates/difftest/README.md). Failing inputs are uploaded as an artifact;
 #   copy them into fixtures/<unit>/ as regression cases once fixed.
-# Runs on GitHub's runners, like Run workflow in ci.yml.
+# Runs on the same Blacksmith runners as ci.yml (see the note there).
 on:
   schedule:
     - cron: "41 3 * * *"
@@ -27,40 +27,19 @@ env:
 
 jobs:
   fuzz:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 240
+    permissions:
+      contents: read
     env:
       SOLIDCORE_CPP_DIR: ${{ github.workspace }}/.cpp
       FUZZ_CASES: ${{ github.event.inputs.fuzz_cases || '300' }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone upstream at pinned commit
-        run: |
-          git init upstream
-          git -C upstream remote add origin "$UPSTREAM_REPO"
-          git -C upstream fetch --depth 1 origin "$UPSTREAM_COMMIT" \
-            || git -C upstream fetch origin
-          git -C upstream checkout --detach "$UPSTREAM_COMMIT"
-
-      - name: Install C++ build tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake g++
-
-      # Same key as ci.yml, so the nightly reuses the PR jobs' C++ build.
-      - name: Cache C++ reference build
-        uses: actions/cache@v4
-        with:
-          path: .cpp
-          key: cpp-v2-${{ runner.os }}-${{ env.UPSTREAM_COMMIT }}-${{ hashFiles('harness/cpp/CMakeLists.txt', 'harness/cpp/build.sh', 'harness/cpp/stubs/**', 'harness/cpp/patches/**') }}
-
-      - name: Build C++ reference (when the cache did not provide the libs)
-        run: |
-          cpp=$SOLIDCORE_CPP_DIR
-          if [ -f "$cpp/lib/libSMLib.a" ] && [ -f "$cpp/lib/libSM_API.a" ] && [ -f "$cpp/ffi.env" ]; then
-            echo "C++ reference restored from cache"
-          else
-            harness/cpp/build.sh --jobs "$(nproc)"
-          fi
+      # Upstream checkout, sccache and the prebuilt (or cached) C++ reference, shared
+      # with ci.yml.
+      - uses: ./.github/actions/cpp-reference
 
       - uses: Swatinem/rust-cache@v2
         with:

@@ -1,5 +1,8 @@
 //! Differential tests of analytic cone intersections, including full analytic and
 //! NURBS curve records, UV curve presence, classification and deviations.
+//! `rejected_*` fixtures assert native FFI guard rejection only; they do not
+//! compare geometry, but still execute the Rust intersection (result ignored) so
+//! a Rust panic or hang on those inputs fails the case.
 use crate::case::CaseContext;
 use crate::runner::default_cases;
 use crate::{Case, HarnessError, Output, Rng, UnitDiff};
@@ -11,10 +14,10 @@ use solidcore::geom::vector2d::Vec2;
 use solidcore::geom::vector3d::Vec3;
 use solidcore::kernel::Kernel;
 use solidcore::nurbs::b_spline_curve::BSplineCurve;
-use solidcore::surface::cone::p3::IntersectTarget;
 use solidcore::surface::cone::Cone;
 use solidcore::surface::plane::Plane;
 use solidcore::surface::surface::p2::SurfaceIntersection;
+use solidcore::surface::surface::Surface;
 use solidcore::SolidError;
 use solidcore_ffi::units::surface_cone_p3 as ffi;
 
@@ -170,21 +173,13 @@ fn rust(i: &Inputs) -> solidcore::Result<Vec<f64>> {
             i.domains.get(4..).unwrap_or(&[]),
         );
         if i.op == 3 {
-            let out = a.global_surface_intersect_with(
-                &k,
-                &da,
-                IntersectTarget::Cone(b),
-                &db,
-                [true, true],
-                i.tolerance,
-                None,
-                |_| {
-                    Err(SolidError::invalid_input(
-                        "difftest::surface_cone_p3",
-                        "global cone fixture unexpectedly needs general intersector",
-                    ))
-                },
-            )?;
+            // SmCone::GlobalSurfaceIntersect through the common Surface dispatch: its
+            // special cases, else the base SmSurface::GlobalSurfaceIntersect.
+            let sa = Surface::from(a.clone());
+            let sb = Surface::from(b.clone());
+            let sb = if i.same { &sa } else { &sb };
+            let out =
+                sa.global_surface_intersect(&k, &da, sb, &db, [true, true], i.tolerance, None)?;
             (false, out)
         } else {
             a.intersect_with_cone(&k, &da, b, &db, i.tolerance)?
@@ -199,21 +194,10 @@ fn rust(i: &Inputs) -> solidcore::Result<Vec<f64>> {
         );
         let db = domain(b.natural_uv_domain(), i.domains.get(4..).unwrap_or(&[]));
         if i.op == 2 {
-            let out = a.global_surface_intersect_with(
-                &k,
-                &da,
-                IntersectTarget::Plane(&b),
-                &db,
-                [true, true],
-                i.tolerance,
-                None,
-                |_| {
-                    Err(SolidError::invalid_input(
-                        "difftest::surface_cone_p3",
-                        "global fixture unexpectedly needs general intersector",
-                    ))
-                },
-            )?;
+            let sa = Surface::from(a.clone());
+            let sb = Surface::from(b);
+            let out =
+                sa.global_surface_intersect(&k, &da, &sb, &db, [true, true], i.tolerance, None)?;
             (false, out)
         } else {
             a.intersect_with_plane(&k, &da, &b, &db, i.tolerance)?
@@ -270,12 +254,26 @@ impl UnitDiff for Runner {
 
     fn run_cpp(&self, case: &Case) -> Result<Output, HarnessError> {
         let i: Inputs = case.parse()?;
-        let out = ffi::intersect(i.op, &i.cone, &i.other, &i.domains, i.tolerance, i.same)
-            .map_err(|e| HarnessError::new(e.to_string()))?;
+        let result = ffi::intersect(i.op, &i.cone, &i.other, &i.domains, i.tolerance, i.same);
+        if case.name.starts_with("rejected_") {
+            return match result {
+                Err(solidcore_ffi::FfiError::Status(solidcore_ffi::SC_ERR_ARG)) => {
+                    Ok(Output::err("ffi_rejected"))
+                }
+                Err(e) => Err(HarnessError::new(format!("unexpected rejection: {e}"))),
+                Ok(_) => Err(HarnessError::new("expected native guard rejection")),
+            };
+        }
+        let out = result.map_err(|e| HarnessError::new(e.to_string()))?;
         output(&out)
     }
     fn run_rust(&self, case: &Case) -> Result<Output, HarnessError> {
         let i: Inputs = case.parse()?;
+        if case.name.starts_with("rejected_") {
+            // Upstream crashes on these inputs; only require that Rust returns.
+            let _ = rust(&i);
+            return Ok(Output::err("ffi_rejected"));
+        }
         match rust(&i) {
             Ok(v) => output(&v),
             Err(e) => Ok(Output::unported(&e).unwrap_or_else(|| {

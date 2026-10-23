@@ -36,8 +36,8 @@
 //! | `MakeOwner`   | `MakeOwner`                                |                               | state |
 //! | `SetBase`     | `SetBaseSurface`                           | surface block `in_param copy owns` | state |
 //! | `SetVolume`   | `SetVolume`                                | volume block `copy owns`      | state |
-//! | `Mirror`      | `CreateMirrorSurface`                      | `O X Y`                       | (status only) |
-//! | `Exact`       | `MakeExactBSplineIfPossible`               |                               | (status only) |
+//! | `Mirror`      | `CreateMirrorSurface`                      | `O X Y`                       | state of the mirrored surface |
+//! | `Exact`       | `MakeExactBSplineIfPossible`               |                               | on success: `made [surface]` |
 //! | `WriteDb`     | `WriteToDB` (ASCII, 17 digits; a generator helper) | `version`            | the bytes |
 //! | `ReadDb`      | `SmSrfInVolume::ReadFromDB` (static, ASCII) | `version nb B[nb]` (no object block) | `made [state]` |
 //!
@@ -45,6 +45,9 @@
 //! `owner_flag in_param` the base surface (`type has_nurb [n m p q r s cpts knots]`)
 //! and the volume chain (`n` then per map `type [matrix(16) if a transform | two members
 //! if a twist, unbend or bend volume] has_orient [O(16)] has_inv [I(16)]`).
+//! `Exact` returns `made = 0` for a successful null result; otherwise its surface
+//! record is `type has_nurb [n m p q r s cpts(x y z w) u_knots v_knots]`, including
+//! the concrete derived type (for example, a plane) rather than a B-spline stand-in.
 //!
 //! [`eval`] accepts only what upstream handles without undefined behaviour: finite
 //! values, well-formed clamped B-splines, planes with a non-zero normal, derivative
@@ -56,6 +59,7 @@
 //! database text that is a complete ASCII record without a plain `SmVolume` or a
 //! B-spline volume (reading a plain volume fills a null volume).
 
+use crate::validate::{bad, check_knots, NOW};
 use crate::{call_with_buffer, FfiError};
 
 /// Most maps in a volume chain.
@@ -70,8 +74,6 @@ pub const MAX_COORD: f64 = 1.0e6;
 pub const MAX_DB_BYTES: usize = 1 << 18;
 /// Largest derivative order `Evaluate` accepts.
 pub const MAX_DERIV: usize = 3;
-
-const NOW: f64 = -f64::MAX;
 
 /// Shim operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,15 +126,7 @@ mod sys {
     }
 }
 
-fn bad(msg: impl Into<String>) -> FfiError {
-    FfiError::InvalidArgument(msg.into())
-}
-
-/// Sequential reader over the input.
-struct Reader<'a> {
-    input: &'a [f64],
-    at: usize,
-}
+crate::reader::unit_reader!(MAX_COORD);
 
 /// What a validated object block says about the object.
 #[derive(Debug, Clone, Copy)]
@@ -151,16 +145,6 @@ struct Block {
 }
 
 impl Reader<'_> {
-    fn num(&mut self) -> Result<f64, FfiError> {
-        let v = self
-            .input
-            .get(self.at)
-            .copied()
-            .ok_or_else(|| bad("input too short"))?;
-        self.at += 1;
-        Ok(v)
-    }
-
     fn finite(&mut self) -> Result<f64, FfiError> {
         let v = self.num()?;
         if !v.is_finite() || v.abs() > MAX_COORD {
@@ -197,13 +181,6 @@ impl Reader<'_> {
         Ok(self.index(1)? == 1)
     }
 
-    fn done(&self) -> Result<(), FfiError> {
-        if self.at != self.input.len() {
-            return Err(bad("trailing input"));
-        }
-        Ok(())
-    }
-
     /// A `uv` point of bounded size.
     fn uv(&mut self) -> Result<[f64; 2], FfiError> {
         Ok([self.finite()?, self.finite()?])
@@ -226,46 +203,6 @@ impl Reader<'_> {
         }
         Ok(())
     }
-}
-
-/// Checks a clamped knot vector of degree `p`.
-fn check_knots(knots: &[f64], p: usize, what: &str) -> Result<(f64, f64), FfiError> {
-    let m = knots
-        .len()
-        .checked_sub(1)
-        .ok_or_else(|| bad(format!("{what}: no knots")))?;
-    if knots.windows(2).any(|w| w.first() > w.last()) {
-        return Err(bad(format!("{what}: knots not non-decreasing")));
-    }
-    let (Some(&a), Some(&b)) = (knots.first(), knots.last()) else {
-        return Err(bad(format!("{what}: empty knots")));
-    };
-    let short = || bad(format!("{what}: knots too short"));
-    if m < 2 * p + 1 {
-        return Err(short());
-    }
-    let head = knots.get(..=p).ok_or_else(short)?;
-    let tail = knots.get(m - p..).ok_or_else(short)?;
-    let inner = knots.get(p + 1..m - p).ok_or_else(short)?;
-    if a >= b || head.iter().any(|&k| k != a) || tail.iter().any(|&k| k != b) {
-        return Err(bad(format!("{what}: knots not clamped")));
-    }
-    if b - a < 1e-6 * a.abs().max(b.abs()).max(1.0) {
-        return Err(bad(format!("{what}: parameter range too small")));
-    }
-    if inner.iter().any(|&k| k == a || k == b) {
-        return Err(bad(format!("{what}: end multiplicity above degree + 1")));
-    }
-    let mut run = 1;
-    for w in inner.windows(2) {
-        run = if w.first() == w.last() { run + 1 } else { 1 };
-        if run > p {
-            return Err(bad(format!(
-                "{what}: interior multiplicity above the degree"
-            )));
-        }
-    }
-    Ok((a, b))
 }
 
 /// Checks `k` control points sharing their rational marker.
@@ -541,7 +478,7 @@ fn has_unreadable_volume_type(bytes: &[u8]) -> bool {
 ///
 /// [`FfiError::InvalidArgument`] for input [`eval`] rejects.
 pub fn validate(op: Op, input: &[f64]) -> Result<(), FfiError> {
-    let mut rd = Reader { input, at: 0 };
+    let mut rd = Reader::new(input);
     if op == Op::ReadDb {
         rd.index(1 << 20)?;
         let nb = rd.index(MAX_DB_BYTES)?;

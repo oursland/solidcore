@@ -354,6 +354,8 @@ mod tests {
             rejected: None,
             deferred: None,
             perturbed: None,
+            diagnostics: BTreeMap::default(),
+            known_mismatch: None,
         };
         match outcome {
             "pass" => {}
@@ -377,6 +379,7 @@ mod tests {
             harness_error: None,
             abs_floors: Vec::new(),
             seeds: 16,
+            timing: crate::runner::UnitTiming::default(),
         }
     }
 

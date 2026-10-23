@@ -293,6 +293,63 @@ fn geometry_cpp(g: &Geometry) -> Result<Output, HarnessError> {
         .map(output)
         .map_err(|e| HarnessError::new(e.to_string()))
 }
+/// The shim's face surface: kind 3 is a quadratic B-spline patch, every other kind an
+/// `SmPlane` over `domain` (kind 4 with rotated axes).
+fn face_surface(
+    kind: i32,
+    p: &[f64; 16],
+    domain: &solidcore::geom::extent2d::Extent2d,
+) -> solidcore::Result<solidcore::surface::surface::Surface> {
+    use solidcore::math::{Vec2, Vec3};
+    use solidcore::nurbs::math::CPoint;
+    Ok(if kind == 3 {
+        let cp: Vec<Vec<_>> = (0..3)
+            .map(|i| {
+                (0..3)
+                    .map(|j| {
+                        CPoint::new(
+                            p[0] + f64::from(i) * 0.5 * p[3],
+                            p[1] + f64::from(j) * 0.5 * p[4],
+                            p[2] + if i == 1 && j == 1 { 2.0 } else { 0.0 },
+                            1.0,
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        solidcore::surface::surface::Surface::from(
+            solidcore::nurbs::b_spline_surface::BSplineSurface::from_data(
+                2,
+                2,
+                2,
+                2,
+                5,
+                5,
+                &cp,
+                &[0., 0., 0., 1., 1., 1.],
+                &[0., 0., 0., 1., 1., 1.],
+            )?,
+        )
+    } else {
+        solidcore::surface::surface::Surface::from(
+            solidcore::surface::plane::Plane::new(
+                Vec3::new(p[0], p[1], p[2]),
+                if kind == 4 {
+                    Vec3::new(0.6, 0.8, 0.0)
+                } else {
+                    Vec3::X
+                },
+                if kind == 4 {
+                    Vec3::new(-0.8, 0.6, 0.0)
+                } else {
+                    Vec3::Y
+                },
+                Vec2::new(p[3], p[4]),
+                domain,
+            ),
+        )
+    })
+}
 fn geometry_rust(g: &Geometry) -> Output {
     use solidcore::curve::curve::Curve;
     use solidcore::geom::extent1d::Extent1d;
@@ -346,9 +403,19 @@ fn geometry_rust(g: &Geometry) -> Output {
                         store: &store,
                         key_of: &|_| solidcore::geom::attribute::ObjectKey(0),
                     };
-                    props::brep_properties(
-                        &kernel,
-                        &Brep::new(),
+                    // As the shim: a wire edge over the curve interval in a fresh B-rep
+                    // (`CreateWireEdgeFromCurve`), then the B-rep's precise properties.
+                    let mut wire_kernel = Kernel::default();
+                    let mut brep = Brep::new_with_infinite_region()?;
+                    solidcore::topology::brep::p5::create_wire_edge_from_curve(
+                        &mut wire_kernel,
+                        &mut brep,
+                        c,
+                        ivl,
+                    )?;
+                    let p = props::brep_properties(
+                        &wire_kernel,
+                        &brep,
                         accuracy,
                         Vec3::new(ox, oy, oz),
                         props::MassPropertyBehavior {
@@ -357,9 +424,13 @@ fn geometry_rust(g: &Geometry) -> Output {
                         },
                         &attrs,
                     )?;
-                    return Err(SolidError::sm_err("unexpected brep dependency"));
+                    let mut out = vec![0.0, p.area, p.volume, p.mass];
+                    for m in p.moments {
+                        out.extend([m.x, m.y, m.z]);
+                    }
+                    return Ok(out);
                 }
-                let p = props::curve_properties(&c, &ivl, accuracy, Vec3::new(ox, oy, oz), radius)?;
+                let p = props::curve_properties(&kernel, &c, &ivl, accuracy, Vec3::new(ox, oy, oz), radius)?;
                 let mut out = vec![0.0, p.length, p.properties.area, p.properties.volume];
                 for m in p.properties.moments {
                     out.extend([m.x, m.y, m.z]);
@@ -373,46 +444,92 @@ fn geometry_rust(g: &Geometry) -> Output {
             } => {
                 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
                 if *query != 0 && *query != 7 {
+                    // The aggregate queries (face area / centroid, B-rep area / volume /
+                    // mass properties): as the shim, `new SmBrep()`, the face from
+                    // SmBrep::CreateFaceFromSurface over the requested UV domain, then the
+                    // public API query on that face or B-rep.
+                    if *kind == 1 || *kind == 2 {
+                        // The shim builds disk / annulus faces with CreateFacesWithCurves;
+                        // no fixture or generated case runs an aggregate query on them.
+                        return Err(SolidError::Unported {
+                            upstream: "mass.integrator runner: no Rust CreateFacesWithCurves face for the aggregate queries",
+                            unit: "harness:mass.integrator-face-construction",
+                        });
+                    }
                     let store = solidcore::geom::attribute::AttributeStore::default();
                     let attrs = props::PropertyAttributes {
                         store: &store,
                         key_of: &|_| solidcore::geom::attribute::ObjectKey(0),
                     };
-                    let brep = Brep::new();
-                    let f = solidcore::topology::FaceId::from_index(0);
-                    match *query {
-                        2 => {
-                            props::face_area(&kernel, &brep, f, p[12])?;
-                        }
+                    let mut fk = Kernel::default();
+                    let mut brep = solidcore::topology::brep::p3::new_brep(
+                        &mut fk,
+                        solidcore::geom::tol::USE_DEFAULT,
+                        solidcore::geom::tol::USE_DEFAULT,
+                    )?;
+                    let dom = Extent2d::from_points(Vec2::new(p[5], p[6]), Vec2::new(p[7], p[8]));
+                    let surface = face_surface(*kind, p, &dom)?;
+                    let face = {
+                        use crate::units::topology_brep_p8::key_of;
+                        use solidcore::EntityRef;
+                        let mut records = std::collections::BTreeMap::new();
+                        let mut attributes = solidcore::geom::attribute::AttributeStore::default();
+                        let mut env = solidcore::topology::edge::NotifyEnv {
+                            records: &mut records,
+                            attributes: &mut attributes,
+                            context: None,
+                            key_of: &key_of,
+                        };
+                        let mut marks = solidcore::topology::topology_traverser::Marks::default();
+                        let this_face = |f| key_of(EntityRef::Face(f));
+                        let mut fenv = solidcore::topology::brep::p8::FaceBuildEnv {
+                            env: &mut env,
+                            marks: &mut marks,
+                            this_face: &this_face,
+                        };
+                        solidcore::topology::brep::p8::create_face_from_surface(
+                            &mut fk,
+                            &mut brep,
+                            Some(surface),
+                            &dom,
+                            &mut fenv,
+                        )?
+                    };
+                    let accuracy = p[12];
+                    return match *query {
+                        2 => Ok(vec![0.0, props::face_area(&fk, &brep, face, accuracy)?]),
                         3 => {
-                            props::face_centroid(&kernel, &brep, f, p[12])?;
+                            let (area, c) = props::face_centroid(&fk, &brep, face, accuracy)?;
+                            Ok(vec![0.0, area, c.x, c.y, c.z])
                         }
-                        4 => {
-                            props::brep_area(&kernel, &brep, p[12])?;
-                        }
-                        5 => {
-                            props::brep_volume(&kernel, &brep, p[12], &attrs)?;
-                        }
+                        4 => Ok(vec![0.0, props::brep_area(&fk, &brep, accuracy)?]),
+                        5 => Ok(vec![0.0, props::brep_volume(&fk, &brep, accuracy, &attrs)?]),
                         6 => {
-                            props::brep_mass_properties(
-                                &kernel,
+                            let m = props::brep_mass_properties(
+                                &fk,
                                 &brep,
-                                p[12],
+                                accuracy,
                                 1.0,
                                 Vec3::new(p[9], p[10], p[11]),
                                 &attrs,
                             )?;
+                            Ok(vec![0.0, m.properties.area])
                         }
-                        _ => return Err(SolidError::sm_err("unknown query")),
-                    }
-                    return Err(SolidError::sm_err("unexpected topology dependency"));
+                        _ => Err(SolidError::sm_err("unknown query")),
+                    };
                 }
                 // Import only input geometry: C++ constructs and exports its actual
                 // oriented trims. Both sides then integrate those same boundaries.
                 let raw = ffi::face(1, *kind, p).map_err(|_| SolidError::sm_err("trim export"))?;
                 let mut it = raw.into_iter();
                 if it.next() != Some(0.0) {
-                    return Err(SolidError::sm_err("trim construction"));
+                    // the C++ could not construct the face, so there are no trims to
+                    // import: the Rust side has nothing to integrate (a harness
+                    // limitation, as for the aggregate queries)
+                    return Err(SolidError::Unported {
+                        upstream: "mass.integrator runner: the C++ face construction failed",
+                        unit: "harness:mass.integrator-face-construction",
+                    });
                 }
                 let estimated_area = it.next().ok_or_else(|| SolidError::sm_err("bbox export"))?;
                 let u0 = it
@@ -445,9 +562,26 @@ fn geometry_rust(g: &Geometry) -> Output {
                         })
                         .collect();
                     let knots: Vec<_> = it.by_ref().take(m + 1).collect();
-                    curves.push(Curve::from(BSplineCurve::from_data(
-                        2, n, m, degree, &cp, &knots,
-                    )?));
+                    let base = BSplineCurve::from_data(2, n, m, degree, &cp, &knots)?;
+                    // C++ evaluates an SmLine trim analytically, not through its NURB.
+                    let line = it.next().ok_or_else(|| SolidError::sm_err("trim type"))?;
+                    if line == 0.0 {
+                        curves.push(Curve::from(base));
+                        continue;
+                    }
+                    let mut v = [0.0; 10];
+                    for x in &mut v {
+                        *x = it.next().ok_or_else(|| SolidError::sm_err("trim line"))?;
+                    }
+                    let [px, py, pz, vx, vy, vz, a, b, scale, inside_out] = v;
+                    curves.push(Curve::from(solidcore::curve::line::Line::from_parts(
+                        base,
+                        Vec3::new(px, py, pz),
+                        Vec3::new(vx, vy, vz),
+                        Extent1d::from_raw(a, b),
+                        scale,
+                        inside_out != 0.0,
+                    )));
                 }
                 let domain = if *query == 7 {
                     // Surface::Area integrates the requested rectangle, independent
@@ -456,53 +590,7 @@ fn geometry_rust(g: &Geometry) -> Output {
                 } else {
                     Extent2d::from_points(Vec2::new(u0, v0), Vec2::new(u1, v1))
                 };
-                let surface = if *kind == 3 {
-                    let cp: Vec<Vec<_>> = (0..3)
-                        .map(|i| {
-                            (0..3)
-                                .map(|j| {
-                                    CPoint::new(
-                                        p[0] + f64::from(i) * 0.5 * p[3],
-                                        p[1] + f64::from(j) * 0.5 * p[4],
-                                        p[2] + if i == 1 && j == 1 { 2.0 } else { 0.0 },
-                                        1.0,
-                                    )
-                                })
-                                .collect()
-                        })
-                        .collect();
-                    solidcore::surface::surface::Surface::from(
-                        solidcore::nurbs::b_spline_surface::BSplineSurface::from_data(
-                            2,
-                            2,
-                            2,
-                            2,
-                            5,
-                            5,
-                            &cp,
-                            &[0., 0., 0., 1., 1., 1.],
-                            &[0., 0., 0., 1., 1., 1.],
-                        )?,
-                    )
-                } else {
-                    solidcore::surface::surface::Surface::from(
-                        solidcore::surface::plane::Plane::new(
-                            Vec3::new(p[0], p[1], p[2]),
-                            if *kind == 4 {
-                                Vec3::new(0.6, 0.8, 0.0)
-                            } else {
-                                Vec3::X
-                            },
-                            if *kind == 4 {
-                                Vec3::new(-0.8, 0.6, 0.0)
-                            } else {
-                                Vec3::Y
-                            },
-                            Vec2::new(p[3], p[4]),
-                            &domain,
-                        ),
-                    )
-                };
+                let surface = face_surface(*kind, p, &domain)?;
                 if *query == 7 {
                     let eval = solidcore::surface::surface::p1::AreaIntegrand {
                         surface: &surface,
@@ -514,7 +602,7 @@ fn geometry_rust(g: &Geometry) -> Output {
                         domain.max().x,
                         IntegrationAlgorithm::Romberg,
                         p[12],
-                        |t| eval.evaluate(t),
+                        |t| eval.evaluate(&kernel, t),
                     )?;
                     return Ok(if area == 0.0 {
                         vec![1001.0]
@@ -523,6 +611,7 @@ fn geometry_rust(g: &Geometry) -> Output {
                     });
                 }
                 let properties = props::boundary_properties(
+                    &kernel,
                     &surface,
                     &curves,
                     &domain,
