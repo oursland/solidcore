@@ -642,6 +642,10 @@ void siv_op(int32_t op, Rd& rd, const SmContext& ctx, Built& bb, std::vector<dou
         SmBSplineSurface* b = NULL;
         SmStatus s = c->MakeExactBSplineIfPossible(b);
         o.push_back(st(s));
+        // upstream returns SM_SUCCESS with a NULL output when no map can project exactly
+        o.push_back(b != NULL ? 1.0 : 0.0);
+        if (b != NULL)
+            put_surface(o, b);
         break;
     }
     case OP_WRITE_DB:

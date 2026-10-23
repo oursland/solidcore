@@ -13,8 +13,7 @@
 //! `SM_SUCCESS`, else the `SmStatus`; `1007` for a Rust `InvalidInput`, `-1` for a Rust
 //! error upstream cannot produce) and the rest as `out`.
 //!
-//! Deferred cases: `MakeExactBSplineOutSurfaceFrom*Space` (in no unit in `units.json`: a
-//! dispatch gap), the plane's `Transform` / `TrimWithDomain`
+//! Deferred cases: the plane's `Transform` / `TrimWithDomain`
 //! (`surface.plane_p2`) and the base surface's `STEPInversion`, which runs
 //! `SmSurface::GlobalPointSolve` (`surface.surface_p4`) once the volume inversion has
 //! succeeded. Volumes are chains of transform, plain, default and component
@@ -858,8 +857,15 @@ fn rust(i: &Inputs) -> Result<Output, HarnessError> {
             put_state(&mut o, &m);
         }
         OpIn::Exact => {
-            tri!(o, siv_of(&s)?.make_exact_b_spline_if_possible());
+            // `MakeExactBSplineIfPossible` returns SM_SUCCESS whether or not a map can
+            // produce an exact surface (the output is then NULL); the shim exports the
+            // surface it made, so its kind and NURB compare too.
+            let exact = tri!(o, siv_of(&s)?.make_exact_b_spline_if_possible(&k));
             o.push(0.0);
+            o.push(b(exact.is_some()));
+            if let Some(exact) = exact {
+                put_surface(&mut o, &exact);
+            }
         }
         OpIn::ReadDb { .. } => return Err(harness("static op")),
     }
