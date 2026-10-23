@@ -576,6 +576,17 @@ pub fn run_unit(unit: &dyn UnitDiff, ctx: &CaseContext, opts: &RunOptions) -> Un
                 }
                 cr.both_errored = c.error.is_some() && r.error.is_some();
                 cr.diff = compare(&c, &r, unit.abs_floors());
+                if opts.perturb && cr.perturbed.is_some() && cr.pass() {
+                    // Only reachable when the perturbation is not observable in the
+                    // comparison; the records are the only way to see why.
+                    eprintln!(
+                        "uncaught perturbation {} ({})",
+                        cr.name,
+                        cr.perturbed.unwrap_or("")
+                    );
+                    eprintln!("  cpp:  {c:?}");
+                    eprintln!("  rust: {r:?}");
+                }
             }
             (c, r) => {
                 let msgs: Vec<String> = [c.err(), r.err()].into_iter().flatten().collect();
