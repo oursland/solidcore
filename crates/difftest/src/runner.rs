@@ -63,7 +63,7 @@ pub struct RunOptions {
     /// Only run cases whose name contains this substring.
     pub filter: Option<String>,
     /// Sensitivity check: change one item of each case's Rust output before
-    /// comparing (see [`perturb_output`]); every perturbed case must fail.
+    /// comparing (see [`perturb_output`]); every perturbed case must stop passing.
     pub perturb: bool,
 }
 
@@ -358,13 +358,17 @@ impl UnitResult {
     }
 
     /// Perturb mode: (perturbed cases, of which detected).
+    ///
+    /// A perturbed case is detected when it does not pass: a mismatch (including a
+    /// listed [known mismatch](crate::known), which is not a `fail()`), a harness
+    /// error, or a rejection. Only a case that still passes was missed.
     pub fn perturb_stats(&self) -> (usize, usize) {
         let p: Vec<&CaseResult> = self
             .cases
             .iter()
             .filter(|c| c.perturbed.is_some())
             .collect();
-        (p.len(), p.iter().filter(|c| c.fail()).count())
+        (p.len(), p.iter().filter(|c| !c.pass()).count())
     }
 }
 
@@ -733,6 +737,35 @@ mod tests {
                 "{x:e} -> {y:e}"
             );
         }
+    }
+
+    #[test]
+    fn perturb_counts_a_listed_mismatch_as_detected() {
+        // A listed known mismatch is not a `fail()`, but a perturbed comparison that
+        // still does not pass was detected all the same.
+        let c = CaseResult {
+            name: "listed".into(),
+            source: CaseSource::Inline,
+            inputs: Value::Null,
+            diff: compare(&Output::err("a"), &Output::err("b"), &[]),
+            harness_error: None,
+            both_errored: false,
+            rejected: None,
+            deferred: None,
+            perturbed: Some("value"),
+            diagnostics: BTreeMap::new(),
+            known_mismatch: Some("why".into()),
+        };
+        let r = UnitResult {
+            unit: "u".into(),
+            cases: vec![c],
+            harness_error: None,
+            abs_floors: Vec::new(),
+            seeds: 0,
+            timing: UnitTiming::default(),
+        };
+        assert_eq!(r.cases[0].outcome(), CaseOutcome::KnownMismatch);
+        assert_eq!(r.perturb_stats(), (1, 1));
     }
 
     #[test]

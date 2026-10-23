@@ -367,7 +367,7 @@ fn main() -> ExitCode {
             };
             println!(
                 "{} {id} perturbed={n} detected={caught} unperturbed={unperturbed} deferred={}{rejected} \
-                 (perturb mode: every perturbed case must FAIL)",
+                 (perturb mode: every perturbed case must stop passing)",
                 if ok { "SENSITIVE" } else { "INSENSITIVE" },
                 res.deferred()
             );
@@ -375,7 +375,7 @@ fn main() -> ExitCode {
                 for c in res
                     .cases
                     .iter()
-                    .filter(|c| c.perturbed.is_some() && !c.fail())
+                    .filter(|c| c.perturbed.is_some() && c.pass())
                 {
                     println!(
                         "  uncaught perturbation {} [{}] ({})",
