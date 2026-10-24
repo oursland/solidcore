@@ -66,7 +66,7 @@ pub struct RunOptions {
     /// Only run cases whose name contains this substring.
     pub filter: Option<String>,
     /// Sensitivity check: change one item of each case's Rust output before
-    /// comparing (see [`perturb_output`]); every perturbed case must stop passing.
+    /// comparing (see [`perturb_output`]); every perturbed case must fail.
     pub perturb: bool,
 }
 
@@ -363,17 +363,13 @@ impl UnitResult {
     }
 
     /// Perturb mode: (perturbed cases, of which detected).
-    ///
-    /// A perturbed case is detected when it does not pass: a mismatch (including a
-    /// listed [known mismatch](crate::known), which is not a `fail()`), a harness
-    /// error, or a rejection. Only a case that still passes was missed.
     pub fn perturb_stats(&self) -> (usize, usize) {
         let p: Vec<&CaseResult> = self
             .cases
             .iter()
             .filter(|c| c.perturbed.is_some())
             .collect();
-        (p.len(), p.iter().filter(|c| !c.pass()).count())
+        (p.len(), p.iter().filter(|c| c.fail()).count())
     }
 }
 
@@ -590,6 +586,10 @@ pub fn run_unit(unit: &dyn UnitDiff, ctx: &CaseContext, opts: &RunOptions) -> Un
                 cr.diagnostics = r.diagnostics.as_deref().cloned().unwrap_or_default();
                 if opts.perturb {
                     cr.perturbed = perturb_output(&mut r);
+                    if cr.perturbed.is_some() {
+                        // The known-result waiver does not cover an injected error.
+                        cr.known_mismatch = None;
+                    }
                 }
                 cr.both_errored = c.error.is_some() && r.error.is_some();
                 cr.diff = compare(&c, &r, unit.abs_floors());
@@ -750,35 +750,6 @@ mod tests {
                 "{x:e} -> {y:e}"
             );
         }
-    }
-
-    #[test]
-    fn perturb_counts_a_listed_mismatch_as_detected() {
-        // A listed known mismatch is not a `fail()`, but a perturbed comparison that
-        // still does not pass was detected all the same.
-        let c = CaseResult {
-            name: "listed".into(),
-            source: CaseSource::Inline,
-            inputs: Value::Null,
-            diff: compare(&Output::err("a"), &Output::err("b"), &[]),
-            harness_error: None,
-            both_errored: false,
-            rejected: None,
-            deferred: None,
-            perturbed: Some("value"),
-            diagnostics: BTreeMap::new(),
-            known_mismatch: Some("why".into()),
-        };
-        let r = UnitResult {
-            unit: "u".into(),
-            cases: vec![c],
-            harness_error: None,
-            abs_floors: Vec::new(),
-            seeds: 0,
-            timing: UnitTiming::default(),
-        };
-        assert_eq!(r.cases[0].outcome(), CaseOutcome::KnownMismatch);
-        assert_eq!(r.perturb_stats(), (1, 1));
     }
 
     #[test]
@@ -1042,6 +1013,20 @@ mod tests {
             crate::report::unit_report(&k)["cases"][1]["known_mismatch"],
             "w"
         );
+
+        let injected = run_unit(
+            &EmptyOrErr,
+            &known_root("perturbed-listed", &entry("err")),
+            &RunOptions {
+                perturb: true,
+                ..RunOptions::default()
+            },
+        );
+        assert_eq!(injected.perturb_stats(), (1, 1));
+        assert_eq!(injected.cases[1].perturbed, Some("error"));
+        assert_eq!(injected.cases[1].outcome(), CaseOutcome::Fail);
+        assert!(injected.cases[1].known_mismatch.is_none());
+        assert_eq!(injected.known_mismatches(), 0);
 
         // A listed case that passes, or one that does not exist, fails the unit.
         let stale = run_unit(

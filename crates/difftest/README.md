@@ -38,7 +38,7 @@ nice -n 10 cargo test -p difftest --features cpp                     # harness s
 | `--seeds N` | generated cases per unit (default 16) |
 | `--filter S` | only cases whose name contains `S` |
 | `--perturb` | change one item of each case's Rust output (below); passes only if **every** perturbed case is caught. No report written. |
-| `--baseline D` | regression ratchet: compare each unit with its earlier report `D/<unit>.json` (see [Regression gate](#regression-gate---baseline-value-share)). CI downloads the base commit's `difftest-reports` artifact |
+| `--baseline D` | regression ratchet: compare each unit with its earlier report `D/<unit>.json` (see [Regression gate](#regression-gate---baseline-value-share)). CI passes the exact base revision's validated report artifact |
 | `--report-dir D` / `--no-report` | report location (default `reports/difftest/`) / skip writing |
 | `--fuzz N` | with `--unit`: probe the unit's FFI guard with N mutated cases, each run in a child process (below). No report written. |
 | `--fuzz-out D` | where `--fuzz` writes failing inputs (default `bin/fuzz/`; files go to `D/<unit>/`) |
@@ -276,40 +276,44 @@ deferral is a harness error.
 
 ## Regression gate (`--baseline`, value share)
 
-Passing every case is not enough: a unit that silently loses cases, turns passes
-into deferrals, or makes its generator reach only error paths stays green. Two
-checks, run on every unit that does not already fail, close that gap
-(`src/baseline.rs`):
+Passing cases must retain their identities, outcomes and value coverage.
+`--baseline D` compares a full unit run against `D/<unit>.json`: passing cases
+must remain passing, including against `known_mismatch`; cases that compared
+float/integer/topology values must keep value coverage. Deferred, failing and
+known-mismatch cases cannot disappear. A known mismatch must remain known or
+become a genuine pass; it cannot become deferred or rejected. Every retained case
+that compared values must keep value coverage. Rejected fixture constructors may be
+removed; new passing cases and genuine fixes are allowed. Changed seeds and
+`--filter` with `--baseline` are errors, so generated cases cannot silently vanish.
+With `--green`, dropped baseline units fail in the parent before parallel workers
+start. Children receive `--baseline` and enforce the same per-unit gates.
+Whole-set `--green`/`--all` preflight validates every report. Explicit `--unit`
+preflight validates selected reports and refuses an empty baseline; new units may
+have no earlier report. This avoids parsing the full corpus in every worker.
 
-* **Ratchet** (`--baseline D`): the run is compared case by case, by name, with
-  the unit's earlier report `D/<unit>.json`. Reports are CI artifacts (never
-  committed), so CI downloads the exact base commit's `difftest-reports` run
-  artifact with `scripts/ci/difftest-baseline.sh` (base of a PR or a merge-group
-  entry; the previous main for a push). If that fails, the job fails; only a push
-  without a base commit, or a manual run, skips the ratchet. With `--jobs`, each
-  child checks its own unit and the parent checks dropped units. A **GATE-FAIL** is
-  printed when a case that **passed** there is missing, now deferred or rejected,
-  or compared values there but compares nothing now (e.g. both sides now return
-  the same error); when a **deferred or failing** case is missing; or, with
-  `--green`, when a unit that was green/partial there is no longer run. Allowed:
-  new cases, deferred → pass (a dependency landed), removing rejected fixtures.
-  Generated cases are matched only when both runs used the same `--seeds`; with
-  `--filter` the ratchet is skipped. A unit with no earlier report is new and
-  only gets the value-share check.
-* **Value share** (always on, also in `--status-of`): at least 75% of a unit's
-  passing cases, and at least one, must compare a value (float, integer or
-  topology entry), not only an error string both sides agreed on. When this
-  floor was set, every green/partial unit passed it; a unit that does not needs
-  more success-path comparisons in its generator, not a lower floor. A reviewed
-  exception needs a `value-share` waiver with a reason in
-  `plan/difftest-waivers.toml` (none at present).
+The separate value-share floor remains 75% of a unit's passing cases and at
+least one value-bearing case. Both-error and vacuous passes stay in the
+denominator. Known mismatches are not passes and cannot waive new discrepancies.
 
-Reports record `exact_compared` (integer/topology comparisons) per case, so the
-ratchet can tell integer-only cases that compared something. A passing case that
-compares nothing is also counted as `vacuous` in the summary line and marked in
-the report. Baseline reports written before this field existed only record float
-comparisons, so integer-only cases are not value-ratcheted until the base
-commit's reports are regenerated (every push to main does that).
+CI retrieves the exact base SHA's successful push/main CI artifact through
+`scripts/ci/difftest-baseline.sh`. PRs use `pull_request.base.sha`, merge queues
+use `merge_group.base_sha`, and main pushes use `before`. Repository/workflow,
+run/attempt, artifact ownership, SHA256 and complete report set must validate.
+Missing/expired/corrupt baselines fail closed; no latest-main or committed-report
+fallback is allowed. Only a genuine zero-before first push, or a manual run with
+explicit `diagnostic_only`, skips the ratchet with a notice. Manual validation
+runs supply `baseline_sha`. The crate-wide `audit.recursion` review is excluded
+only when the exact base's selector explicitly declares this non-runner policy;
+other missing runner/report units fail. Provenance is stored beside the reports.
+
+Modern reports serialize actual `exact_compared` counts (including zero) with
+`schema_version = 1`. Old #550 reports omitted those counts, but their vacuity
+marker proves boolean integer coverage for a zero-float pass that is neither
+vacuous nor both-error. This bridge never invents an integer comparison count. Legacy known mismatches
+with zero floats need an indexed integer mismatch as proof of exact-value
+coverage; missing or ambiguous proof fails closed.
+Ambiguous older schemas fail rather than silently discarding coverage.
+Reports remain generated artifacts; never regenerate-and-commit baseline reports.
 
 A legitimate regression (a wrong fixture removed, a case renamed) needs a waiver
 in `plan/difftest-waivers.toml`, reviewed with the PR:

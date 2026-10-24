@@ -1,11 +1,6 @@
 # Accepted difftest regression-gate violations (crates/difftest/README.md, "Regression gate").
-# Every entry needs a reason a reviewer can check. Add an entry only for a reviewed
-# exception, never to get a unit green. Remove ratchet waivers once the PR that needed
-# them has merged (the base commit's reports then no longer contain the case).
-#
-# No violations are waived at present. The two units that were below the value-share
-# floor when this gate was first proposed (query.face_p3 and boolean.merge_p3) now pass
-# it once integer/topology comparisons are counted (765/1000 and 271/361 on 2026-10-23).
+# Every entry needs a reason a reviewer can check. Remove ratchet waivers once the PR
+# that needed them has merged (the base commit's reports then no longer contain the case).
 #
 # [[waiver]]
 # unit = "nlib.knots"
