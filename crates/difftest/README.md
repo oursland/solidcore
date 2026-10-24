@@ -304,12 +304,12 @@ checks, run on every unit that does not already fail, close that gap
   exception needs a `value-share` waiver with a reason in
   `plan/difftest-waivers.toml` (none at present).
 
-Reports record `exact_compared` (integer/topology comparisons) per case when
-nonzero, so the ratchet can tell integer-only cases that compared something. A
-passing case that compares nothing is also counted as `vacuous` in the summary
-line and marked in the report. Baseline reports written before this change only
-record float comparisons, so integer-only cases are not value-ratcheted until
-the base commit's reports are regenerated (every push to main does that).
+Reports record `exact_compared` (integer/topology comparisons) per case, so the
+ratchet can tell integer-only cases that compared something. A passing case that
+compares nothing is also counted as `vacuous` in the summary line and marked in
+the report. Baseline reports written before this field existed only record float
+comparisons, so integer-only cases are not value-ratcheted until the base
+commit's reports are regenerated (every push to main does that).
 
 A legitimate regression (a wrong fixture removed, a case renamed) needs a waiver
 in `plan/difftest-waivers.toml`, reviewed with the PR:

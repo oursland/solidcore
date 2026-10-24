@@ -17738,6 +17738,73 @@ outside this change.
   boolean.merge_p2)` although the unit is ported (34 taper cases); `SweepStore` has the
   merge services.
 
+## blend.fillet_corner_p2: RecordFilletError call sites (2026-10-23)
+
+`SmFilletCorner::RecordFilletError` is ported (`FilletCorner::record_fillet_error`,
+PR #641): it takes the executive (`FilletExecutive::note_fillet_corner_error`) and the
+caller's identities of the filleted vertex, fillet surfaces and fillet vertices. Its two
+callers, `SmFilletEdge::CalcFilletIntFillet` (`blend/fillet_geom/p3.rs`) and the
+fillet-vertex calculator in `blend/fillet_geom/p5.rs`, hold the corner only as a
+`FilletCornerId` (`GetFilletCorner()`), with no store that resolves it to the corner record
+or to the executive; the other corner calls there (`GetCornerType`, `GetFilletedVertex`,
+... of `blend.fillet_corner_p1`) wait for the same store. Both stubs stay
+`UNPORTED(blend.fillet_corner_p2)` with this justification; wire them together with the
+corner_p1 ones when fillet geometry code reaches the corners. No disagreement.
+
+## blend.fillet_corner_p2: what the corner harness covers of the ported corner methods (PR #641)
+
+- **Compared with values:** `SmFilletNx2Corner::AdjustConcaveCornerTopology` and
+  `SmFilletNx2Corner::AdjustTopology` to the end (the new fillet vertices and edges, the
+  deleted corner edge, mates, the extended side surface's registration is not exported);
+  `MakeAnalyticCornerSurface` on sphere octants (the B-spline sphere of
+  `CreateSphereFromArcs`), chamfer corners (an `SmPlane` or a bilinear patch, and a
+  rail-rail arc recomputed as the corner plane's intersection with its original face),
+  four-sided rail-rail corners (the B-spline surface of revolution) and its early
+  `FALSE` / `TRUE` exits (WR-254), 120 built-in cases (half with real `SmLine` / `SmCircle`
+  edges): 97 pass with values, 23 defer on
+  `MakeConstantRadiusFillet` (unit `blend.fillet_corner_p1`, not ported).
+- **Not compared (refused or not reached):** the corner harness's pseudo-B-rep fillet
+  geometries have no fillet solver (`blend.fillet_geom_p1`'s model), and a solver is
+  dereferenced by `SmFilletConvexNxNCorner::AdjustTopology` past its first cross section
+  (`FindIndexOfRailOnFace`, `GetEdgeuse(0)`), by both tangent-corner splits
+  (`SplitFilletGeomAtSideEdge`, then `ReCalcFilletGeom`) and by
+  `MakeVariableRadiusFillet` past its first cross section (surface generator, centre
+  line, the temporary `SmVariableRadiusFS`). Those cases are refused (`-2`). Their
+  early exits run and match (the `NxN` loop's vertex-type `SER`, vertices off a face,
+  geometries missing on both edge uses; the closed Nx1 test's evaluations, corner points
+  and `LineClosestPoint`; the variable-radius fillet's count, type and `NER` returns).
+  Covering the rest needs corners with real fillet solvers (a fillet executive run), so it
+  waits for `blend.fillet_executive_p1`'s production adapter. The Nx2 tangent corner's code
+  after `CalcCornerVertGeom` is ported for the same reason without a comparison; in Rust
+  `CalcCornerVertGeom` itself still returns `Unported` (its
+  `SmFilletVertex::CalcCornerVertGeom` stub, unit `blend.fillet_geom_p3`, in
+  `blend/fillet_corner/p1.rs`).
+- **Harness changes:** the corner shim appends the fillet vertices an op makes to the
+  model's export in creation order (the Rust model lists every live vertex), exports the
+  corner under test (`this`, stored by new vertices and edges) as corner id 1000000 on both
+  sides, and appends the corner's surfaces to the record. To tell a default corner patch
+  that reaches `MakeFaceBrep` (deferred) from one that returns a status before it, the
+  pre-check runs `MakeAnalyticCornerSurface`'s fits (`sm_CreatePlanarSurface` and
+  `sm_CreateSrfOfRevolution` through C++ wrappers in `blend_fillet_corner_p2_static.inc`,
+  the translation unit that compiles `SmFilletCorner.cpp`; `CreateSphereFromArcs`; the
+  chamfer edges' `sm_SrfSrfIntersection`) and the Coons patch's `CreateCornerBlend` on the
+  same inputs, and deletes their results.
+
+## blend.fillet_corner_p1: sm_CreateSrfOfRevolution lost an SmLine generator (fixed in PR #641)
+
+- **What.** `create_srf_of_revolution` (`blend/fillet_corner/p1.rs`) passed only the
+  generating curve's B-spline part to `BSplineSurface::create_surf_of_revolution`.
+  Upstream's `SmBSplineSurface::CreateSurfOfRevolution` checks `pGenCurve->GetType() ==
+  SmLine_TYPE` and, for a line parallel to the axis (a cylinder), reparametrises the sweep
+  circle with arc length. With an `SmLine` generator the Rust surface's circular knots were
+  `[0, 0.5, 1]` where upstream's are `[0, L/2, L]` (`L` the arc length).
+- **How found.** `blend.fillet_corner_p2`'s new `analytic` cases with real `SmLine` /
+  `SmCircle` edges (four-sided rail-rail corners): 9 cases differed only in the corner
+  surface's knots; the same inputs through a no-op corner operation matched.
+- **Fix.** The line's `line_vector()` is passed as `gen_line_vector`
+  (`create_surf_of_revolution_with_line_vector`), as `rotational_sweep_geometry` and
+  `SurfOfRevolution` already do. `blend.fillet_corner_p1`'s difftest is unchanged (its
+  cases never revolve an `SmLine`).
 
 ## 2026-10-23: Newly reached spine closure exports (#613)
 
@@ -18389,6 +18456,43 @@ semantics are reverted:
   unit test `fix_uv_trim_curves_keeps_interior_parameters`, which fails on the upstream
   code path (interior knots 3.3333 -> 3.3324 for a 1e-3 overshoot) and passes here.
 
+## topology.brep_p10: the heal guard after `Set` patches rejects only data that reaches the healer changed (2026-10-23)
+
+- **Before.** The runner's `heal_guard` rejected every healing case with a `Set` patch
+  (`healing after a set patch walks malformed indices`; 14 generated cases). One crash
+  had been seen on that path: the 2026-10-20 fuzz sweep's `fuzz01957` (fixture
+  `spine_fan.smb`, `set {field 2, index 1, value 0}`, SIGSEGV), kept in
+  `crates/difftest/tests/fuzz_corpus/topology.brep_p10.json`. It is still rejected (only
+  its reason text changed).
+- **Measured** (guard arm removed, each case in its own process, reference build at the
+  pinned harness key). The 14 cases all ran cleanly (12 pass, 1 deferred, 1 then hits the
+  IGES arm). A stress generator forcing healing plus one `Set` (fields 0..=15, index
+  0..=6, values 0..=6, -1, -2, -5, 999999) over the upstream `.smb` files: 21 SIGSEGVs and
+  2 timeouts in 400 cases (25 per field), and 3 Rust/C++ disagreements. Crashes came with
+  fields 2 (loop start edge use), 5 (edge use loop), 7 (edge curve), 12 (edge use type)
+  and 13 (loop edge use count) (9 of 25), each alone, plus field 6 and 8 only together
+  with 7 or 13. E.g. `Tess/nurby_box_cyl_sphere.smb`, options
+  `[true,false,false,false,true,true]`, `set {field 7, index 1, value 6}` (edge 1 on edge
+  6's curve): SIGSEGV with healing, passes bit-identical (1407 values) with healing off,
+  and the same patch with values 0, 2, 3, 5 or 7 does not crash. None of them is an
+  out-of-range index (the shim's simulation of the build passes them all): the build
+  accepts records that are consistent index-wise but not topologically or geometrically,
+  and the healer walks that B-rep unchecked. Whether it crashes depends on the geometry,
+  so there is no input rule finer than "the patch changed what the build accepts".
+- **After.** The arm rejects a case only when its `Set` patches change the patched data
+  (compared with the same patches minus the `Set`s) and the Rust build with healing off
+  does not return `InvalidInput`. `InvalidInput` is exactly the data the shim's build
+  simulation turns into `-2` before upstream runs (UB-164 proper), so upstream never runs
+  there. A `Set` past its array, or to the value a field already holds, is compared. The
+  decision reads only the inputs and the Rust build, never C++ output. The 400 stress
+  cases rerun with the new guard: 0 crashes, 0 timeouts, 0 disagreements, 157 rejected.
+- **Result.** topology.brep_p10 1404 cases: 1166 pass, 0 failed, 231 deferred, 7 rejected
+  (was 1156 / 0 / 231 / 17). The 10 cases now compared are status matches (both sides
+  `-2`). Still rejected: 4 IGES (UB-237) and 3 `Set` cases (`gen0182`, `gen0204`,
+  `gen0218`) whose patch changes data the build accepts. These 3 ran cleanly in
+  isolation, but the same class crashes elsewhere and no input rule separates them.
+- **Not committed.** The stress generator. Its crashing inputs are listed above, and
+  UB-164 in `plan/upstream-issues.md` records the healer trigger.
 ## IsInnerShell on the B-rep with the kept trimmed caches (PR #694 merged with #697, 2026-10-24)
 
 - **Result.** With `IsInnerShell` and `GetPointsInFace` on the caller's B-rep (#694) and
@@ -18439,3 +18543,376 @@ probe still hold no objects, so nothing before the post-move check changes.
   `BrepSeamObjects`-made handles against the B-rep's own objects, and the imprinting
   `MergeInterval` still needs a mutable B-rep context. Both hinge on `BrepSeamObjects`
   taking a mutable B-rep (planned separately), so this change stays in the runner.
+
+## ClassifyLoops' loop bisector builds UV trim curves upstream, on a copy in the port (2026-10-24)
+
+`SmFace::ClassifyLoops` (`query.face_p4`) now calls the ported
+`SmCurveClassification::GetLoopCrossings` for a target loop that crosses no seam. Before,
+an `UNPORTED(intersect.curve_class_p4)` stub was left in place after that unit was
+ported, and about 410 heal-path cases deferred at it. Those cases now compare, and 40 of
+them disagree. They are listed in `crates/difftest/known_mismatches.toml`:
+`heal.heal_data_p1` 26, `topology.brep_p1` 8, `topology.brep_p10` 6.
+
+- **Root cause.** Upstream's bisector edits the real B-rep. The chain is
+  `sms_FindAndClassifyLoopBisector` → `SmFace::CurveOnClassify` →
+  `SmCurveClassification::IntersectTSBound`, which calls
+  `pVertexuse->ComputeUVPoint(sUV)` (SmCurveClass.cpp:15964) with the default
+  `bOKToMakeUVTrimCurve=TRUE`. That builds missing UV trim curves, and
+  `SmEdgeuse::SetUVTrimCurve` then resets the vertex/face gap caches of the edge use's
+  vertex use and of its mate's (`InitVertexFaceGap`, SmEdgeuse.cpp:4537). The port runs
+  the bisector on a private copy of the B-rep (`query/face/p3.rs`, `b.clone()`, and the
+  read-only boundary views behind it). `classify_loops`, `FaceProps::set_props_stage3`
+  and `HealData::cache_face_props_stage3` all take `&Brep`, so those edits are lost.
+- **Values.** `heal.heal_data_p1` `file_plane_square` (plane_square.smb has no UV trim
+  curves): `values.out[227]` is the face-gap length of the first vertex props' worst
+  vertex use, cpp `-1.23456e-61` (`SM_UNDEF_DOUBLE`, cache reset), rust `0`.
+  `topology.brep_p1` `plane_square_heal`: `values.out[317]` cpp 1 rust 0, `out[337]`
+  cpp 0 rust 1 (healed B-rep flags). `topology.brep_p10` `gen0115`: `values.dbls[648]`
+  cpp `2.917160020417993e-3` rust `2.9171595358599514e-3` (later healing works from
+  different UV trim curves). In the other brep_p10 cases the healed B-rep's arrays have
+  different lengths. Each case's first mismatch is in its known-mismatch entry.
+- **Checked.** Running `SmEdge::IsSeam` or `ComputeUVSector` on the real B-rep before
+  stage 3 does not remove the disagreement (port instrumented, not committed). The
+  `IntersectTSBound` chain comes from reading upstream, not from a C++ trace.
+- **Fix (follow-up).** Thread `&mut Brep` from `SetProps_Stage3` through `ClassifyLoops`
+  to the bisector's `CurveOnClassify`, so the UV trims and gap resets reach the B-rep, as
+  the `LazyBrep` tight box in `query::face::p3` already does. `LoopObjectCurves` borrows
+  the B-rep for the classification, so it has to change as well.
+
+## query.face_p4: two scale-1e-3 cylinder cases move with the importer's curve approximation (2026-10-24)
+
+The runner imports the C++ B-rep. The edge curves `MakeFaceWithCurves` and
+`CreateFaceInRegionFromSurface` give analytic faces are only approximated by the importer
+(unit `topology.face_p2`'s `Exact`). Almost every case the loop bisector now reaches has
+such an edge. The classification is integer-valued and agrees on all of them except two,
+so they stay compared, and these two are known mismatches:
+
+- `gen0300`: a rectangle and two bands on an `SmCylinder` at scale `1e-3`, loops
+  reversed. The bisector's UV trim line starts at
+  `(0.010376246333575003, -0.010016146303418206)` in C++ and at
+  `(0.010376246333575003, -0.010016146463519855)` in the port (relative 1.6e-8, from the
+  edge midpoint dropped to the surface). C++'s classification of that line has 3
+  intervals (out / in / out, touches at 0.2097 and 0.2229), the port's has 2 (the first
+  interval unknown). The rectangle then becomes a no-area loop in the port
+  (`classify_loop_ios[2]` cpp 2 rust 1, `[4]` cpp 1 rust 0, `[5]` cpp 1 rust 5,
+  `ordered_no_area.len` cpp 0 rust 1, `scratch_size` cpp 3 rust 2).
+- `gen0157`: the natural face of an `SmCylinder` at scale `1e-3`, swapped:
+  `classify_loop_ios[4]` cpp 1 rust 0, `[5]` cpp 1 rust 5, `ordered_no_area.len` cpp 0
+  rust 1. Same pattern.
+
+I found no input-only exactness rule that separates these two: excluding every case where
+the bisector reaches an inexact edge also drops about 85 cases that agree. The fix
+belongs in the importer (exact analytic edge curves).
+## Remaining native-guard cases are rejected, not deferred
+
+Follows "topology.face_p1 UB-137 crash-trap cases are rejected, not deferred" above: an
+input that crashes or hangs the C++ reference is rejected (AGENTS.md section 4, step
+5.6), decided from the inputs or the Rust side, never from C++ output. The last three
+units whose guards still deferred such inputs now reject them in `run_cpp`, so neither
+side runs and nothing is compared:
+
+- **offset.offset_geometry_creation (HANG-26, HANG-27).** `run_cpp` first follows the
+  Rust script; when it stops at a non-local `FaceuseOffset` of an exact
+  `SmSurfOfRevolution` face with self-intersection (HANG-26), or at an `EdgeuseOffset`
+  beyond the `1e6` distance bound (HANG-27), the case is rejected. The shim's `-6` stop
+  at those ops stays as a safety net (it also covers the unsupported-surface stop, where
+  the Rust side still defers under `harness:analytic-geometry-export`). A script the Rust
+  side cannot follow that far (an unported callee or the cached gap refill first) runs as
+  before. 16 rejected (HANG-26), 0 HANG-27 (the generator's distances stay below the
+  bound); was 16 deferred to `upstream:HANG-26`.
+- **primitive.api_primitives (UB-119).** `run_cpp` runs the Rust `create_pyramid` and
+  rejects the case when it returns `find_outer_loops`' `InvalidInput` "index out of
+  range", which happens exactly where upstream's count translation reads past
+  `sOutLoops` (a zero-area loop no outer loop contains). The C++ no longer runs these
+  inputs (it used to run them with the uninitialised read and the Rust side deferred).
+  The match is narrower than the old one (any `InvalidInput` of `topology::trimming_tools`)
+  and selects the same 5 generated cases; was 5 deferred to `cpp-guard:ub-119`.
+- **topology.brep_p7 (UB-165).** `run_cpp` rejects a `MakeFaceWithCurves` with
+  `pbOptCrvOnSurf` TRUE, 3D curves and no UV curves past its own input checks (the
+  shim's `-2` predicate, with the Rust degeneracy tests), and the Rust side no longer
+  defers it. 3 rejected (`face_curves_cos_no_uv_{0,1,2}_2`, the SIGSEGV reproducers);
+  was 3 deferred to `cpp-guard:ub-165`. Still wider than the trigger in principle: an
+  input upstream refuses after those checks but before `MakeFace` succeeds
+  (`SmBrep.cpp:16178-16511`: vertex search, `MakeShellVertex`, the edge makers) would not
+  crash, but neither the shim nor the runner can tell it apart without running it. No
+  current case is such an input (no generated case meets the predicate).
+- **Result.** Each unit's rejected cases are exactly its former guard deferrals; no
+  other outcome changed. All three units stay partial on their other deferrals.
+  `topology.brep_p7`'s `cpp-guard:null-curve` and `cpp-guard:null-surface` (`-2` guards
+  whose output both sides would only echo) and `topology.brep_p8`'s `cpp-guard:ub-119`
+  are still Rust-side deferrals; no current case reaches them.
+## Skin annular caps: CreateFacesFromSurface resets its output list (2026-10-24)
+
+Root cause of the two cases in "IsInnerShell on the B-rep with the kept trimmed caches"
+above (primitive.primitive_creation_p2 `skin_concentric_loops`, record[7] cpp 1 rust 2;
+sweep.api_surfaces `skin_primitive_annular`, faces[1] cpp 1 rust 2). It was not region
+nesting. `SmPrimitiveCreation::CreateSkinFromFaces` reuses one `sNewFaces` list for every
+loop layer and appends it to `rNewFaces` after each `CreateFacesFromSurface`, which
+starts with `rNewFaces.ReSet()`. The port's `PrimitiveAccess::surface_faces` appended to
+the caller's list instead, so the second layer (the inner tube) also re-reported the
+outer tube's faces: 6 side faces instead of 4, with the outer tube's 2 listed twice.
+`sm_CreateSkinPrimitiveInternal` takes one iso curve per side face at the skin's start
+and end, so each cap got 3 loops (the outer circle twice). The duplicate circle lies on
+the edge of the first copy (`Point3DClassify` gives `SM_PC_VERTEX` in both faces, and
+the big face is used), and the start cap came out as 2 faces.
+
+- **Fix.** `surface_faces` clears its output first, as `ReSet()`. The side face lists of
+  every other caller were already fresh or unused (the swung-surface loop drops its list).
+- **Result.** Both known-mismatch entries are removed and both cases match C++ bit for
+  bit. sweep.api_surfaces is green (882/882).
+## blend.fillet_corner_p3 fuzz: JoinWith of a 1e-300 line in the 3x2 corner patch (2026-10-24, PR #722)
+
+Exposed when PR #722 let `SmFillet3x2MixedConvexityCorner::CreateCornerPatch` run past its
+`JoinWith` (before, the shim stopped there as "not run": `MakeFaceBrep` was a Rust stub).
+`difftest --unit blend.fillet_corner_p3 --fuzz 2000` finds one differing input
+(fuzz00457): the on-extended-edge curve is a cubic from (-1, 0, 0) to (0, 5e-4, 0), the
+on-edge curve a line from (0, 0, 0) to (1e-300, 0, 0). `curve1->JoinWith(1, curve2, 0)`
+succeeds in C++ (the corner then fails later with `SM_ERR_NULL_POINTER`); in Rust
+`BSplineCurve::join_with` fails with `SM_ERR`: the line test is false for the degenerate
+line on both sides (its base vector is below the tolerance), and `create_by_joining`'s
+`degree_elevate` of the degenerate degree-1 segment to degree 3 returns `SM_ERR`
+(`nurbs.b_spline_curve_p2`). Suspected cause: the degree elevation (or a knot / weight
+check before it) of a curve whose control points are 1e-300 apart. Only a fuzzed model
+reaches it; no fixture or generated case does. Not fixed here (unit
+`nurbs.b_spline_curve_p2` / `nurbs.crv_tool_p1`); the same fuzz run also found a C++
+use-after-free (a repeated on-edge corner edge, freed by the 3x2 patch while still in
+`m_vEdges`), now refused by the shim's pre-check.
+## MergeInterval imprinting through a mutable B-rep adapter (2026-10-24)
+
+`SmCurveClassification::MergeInterval` (`intersect.curve_class_p6`) is ported past its
+boundary tolerances (SmCurveClass.cpp:17212-18276): the UNKNOWN-end repair from a region
+or face mid (`sm_ComputeFacePointClass`), the closed/degenerate branch (`UpdatePointClass`,
+`MergePointClass`, `GlueVertices` of a degenerate interval ending on another edge), and
+the three edge cases: a wire edge in a region (`MakeWireEdge`), an edge in a face
+(`FindVertexSector` at both ends with the stale-face recovery over the vertices' shared
+faces, `MakeEdgeInFaceWithVU`, `ClassifyFaceInterval` of every interval after a split,
+`RefreshTolerance` of the new edge's vertices) and the coincident edge (its tolerance
+grown to the interval's gap; with `SM_USE_OLDTOL` also to the source tolerance, then
+`RefreshTolerance` of its first vertex).
+
+- **Adapter.** Upstream edits the objects behind the classification's `SmObject`
+  pointers. `MergeIntervalBrep::merge_context` hands out, per topology handle, the arena,
+  the entity, the map from new ids to handles and the notification state;
+  `merge_interval_mut`, `merge_point_class_mut`, `merge_intervals_mut` and
+  `merge_classifications_mut` edit through it. The read-only entry points run the same
+  code and defer at the first edit (`SmBrep mutable owning context (...)`, unit
+  `topology.brep_p1`, as part 5's read-only entry points).
+- **Callers.** `TopologyIntersector::merge_curve_classes` now merges through
+  `merge_classifications_mut` (`IntersectorBrepP3` requires `MergeIntervalBrep`; the
+  runner's two-B-rep adapter implements it). `topology::face::p1`'s seam split
+  (`split_at_seam_depth`), `topology::brep::p2`/`p7` and the healer still merge
+  read-only. For `topology.face_p1`'s `torus.smb_1_f5_op9` (see "topology.face_p1
+  MoveSeam split cases over handles that name topology") the split's merges need the
+  `BrepSeamObjects` handles to resolve against a mutable B-rep (`topology/face/p4.rs`)
+  before they can use `merge_intervals_mut`; the case still defers at
+  `SmEdge::GetTolerance`, before `MergeInterval`'s edits.
+- **Runner.** `intersect.curve_class_p6` gives each case a fresh copy of the box (the
+  shim builds one per case) and records the box after a merge (counts, sorted vertex and
+  edge tolerances, new vertex points and tolerances, new edge tolerances). The shim's
+  box has editing disabled, so its edge splits (`MakeVertexSplitEdge`) and
+  `MakeEdgeInFaceWithVU` fail with `SM_ERR` on both sides; 28 new `imprint_*` cases
+  enable editing, pick other box objects (`sc_intersect_curve_class_p6_run_picked`) and
+  place lines on the box, so a face split, a chord between two vertex loops, a
+  degenerate point, a coincident edge, an inner edge split at both ends, a wire edge
+  and a region mid with face ends all compare, at every flag combination. All match
+  bit for bit.
+- **Remaining.** `intersect.curve_class_p6`'s 20 `InsertCurveInterval` deferrals
+  (`SmVertex::SetPoint`, `topology.vertex`) are `PointClassification::combine`'s
+  read-only propagation of a surf/surf/surf point to a vertex, not `MergeInterval`
+  (`combine_in_brep` is the mutable form). `boolean.topology_intersector_p3` keeps 15
+  `topology.face_p2` and 14 `topology.vertex` deferrals reached before the merge.
+
+## topology.brep_p10 `project_t0_Defeature_brep1`: the region left after ProjectAndTrim (2026-10-24)
+
+Once `CreateParallelProjectionCurves` reaches the face's cache through the B-rep (it
+deferred at "SmFace handle of a surface's face" before), this ProjectAndTrim case
+compares. Every face is removed on both sides, and the topology agrees except for the
+one region left: C++ keeps the B-rep's former solid region and makes it the infinite
+void region. Its `SmTopology` fields are the file's 99999999 flags and user indices. The
+port keeps the original infinite region, whose fields are 0
+(`ints[6366..6368]`: cpp 99999999, rust 0).
+
+- **Where.** `SmBrep::DeleteFace` with region nesting (`RemoveFaces`) chooses the
+  surviving region from the deleted face's upward face use: the mate's region survives
+  when it is infinite, or void while this side is not. `topology::brep::p3::delete_face`
+  has the same branch, so the difference is in the input. Either the order of the faces
+  `ProjectAndTrim` deletes, or the upward face use of a face split by the imprint,
+  differs before the deletions. Neither is visible in the final export, since everything
+  is gone.
+- **Status.** Recorded as a known mismatch. It needs an intermediate export (a
+  `TrimType::Split` run of the same input, or the face order of the deletion list) to
+  pin down. The four sibling cases stop at `topology.brep_p2`.
+## Wiring FindVertexSector brings 9 more cases to the loop-bisector-on-a-copy mismatch (2026-10-24)
+
+`SmFace::FindVertexSector` is now wired on the mutable curve-classification path
+(`intersect::curve_class::p7::Mutable::find_vertex_sector`, unit `topology.face_p4`). Nine
+heal-path cases that used to defer there now run on into `SetProps_Stage3` →
+`ClassifyLoops` → `sms_FindAndClassifyLoopBisector`, and they disagree in the same way as
+the cases in "ClassifyLoops' loop bisector builds UV trim curves upstream, on a copy in
+the port" above. They are listed in `crates/difftest/known_mismatches.toml` under that
+entry's reason:
+
+| unit | cases | first mismatch |
+|---|---|---|
+| `heal.heal_data_p1` | `file_plane_circ`, `file_plane_circ_rebuild_reverse` | `values.out[215]`: cpp `-1.23456e-61` (cache reset), rust `0` |
+| `topology.brep_p1` | `plane_circ_heal` | `values.out[134]`: cpp 1, rust 0 |
+| `topology.brep_p10` | `read_Fillet_bottle`, `read_Fillet_cyl_cyl_shell`, `read_Fillet_fillet0227`, `read_Solids_extrusion2` | `ints.dbl_bits`, max relative difference 7e-7 |
+| `topology.brep_p10` | `gen0040` | `values.dbls.len`: cpp 1921, rust 1785 |
+| `topology.brep_p10` | `gen0165` | `ints.ints[170]`: cpp 1, rust 0 |
+
+- **Checked (port instrumented, not committed).**
+  - In all nine cases `find_and_classify_loop_bisector_into` runs.
+  - In eight of them the wired `FindVertexSector` is reached from the bisector's
+    `CurveOnClassify` (backtraces).
+  - The two `plane_circ` cases show the same signature as the `plane_square` entries.
+- **`read_Fillet_cyl_cyl_shell`, `read_Fillet_bottle`, `read_Fillet_fillet0227`.** Here
+  `HasSeamProblem`'s seam classification also reaches `FindVertexSector`. It returns
+  `SM_ERR_INVALID_INPUT` from `EvaluateNormalAtSingularity` (the normal sum at a
+  singularity does not unitize). `CurveOnClassify`'s status is ignored there, as upstream
+  does. I have not confirmed that the C++ errors at the same point, so for
+  `read_Fillet_cyl_cyl_shell`, where the bisector reaches no `FindVertexSector`, the seam
+  path is a second possible source.
+- **Fix.** The same as the entry above: thread `&mut Brep` through `ClassifyLoops` to the
+  bisector. When that lands, re-run these nine cases and remove their known-mismatch
+  entries.
+
+## ClassifyFaceInterval's PointClassify wired; classification reads snapshot tolerances (2026-10-24)
+
+`SmFace::PointClassify` from `SmCurveClassification::ClassifyFaceInterval`
+(`intersect::curve_class::p7`) now calls `query::face::p2::point_classify`. On the mutable
+path it runs on the B-rep the face handle resolves to. On the read-only path it runs
+`point_classify_prepared` over the unchanged topology (no copy), and a needed UV trim still
+defers. Most of the deferrals reported at `SmFace::PointClassify`, and many reported at
+`SmEdge::GetCurve` / `SmEdge::GetTolerance` (`topology.edge`), were not unported callees:
+they were dispatch gaps. Two adapters could not resolve their face handle:
+`topology::face::p3::IntersectObjects` (FaceIntersect, also used by
+`MergeSelfIntersectionCurves`) had no `topology_entity`, and `CalculateAnInternalPoint`
+built its `UvLineObjects` with `resolve_topology: false`. Both now resolve.
+
+- **Tolerance read after the trimmed cache build.** `topology.face_p2` `extra00702`
+  (`CalculateAnInternalPoint` on a 0.003 x 0.004 B-spline face) then disagreed: cpp
+  `(8.50e-5, 1.96e-4, -2.53e-4)`, rust `(1.62e-3, 8.40e-4, 4.22e-5)`. C++ (shim
+  instrumented, not committed) classifies the UV line at `v = 1/21` with its crossing at
+  `u = 0.0482` snapped to the corner vertex `(0, 0, -3.19e-4)`. That vertex's tolerance
+  has been raised from 1e-5 to 8.05e-4 by the face's trimmed cache build
+  (`smsurf_GetSurfaceCache` in `IntersectTSBound`). The port builds that cache on the
+  classification snapshot, but `sm_InsertSolutions`' edge-end vertex test read the
+  tolerance from the caller's unchanged B-rep (1e-5), so the crossing stayed an edge
+  hit. `WithMadeTrimCurves::topology_zone_tol_3d` now reads the face's B-rep entities
+  from the snapshot, as upstream reads the B-rep it just edited. The case passes, and
+  `topology.face_p2` is green.
+- **topology.brep_p1 BrepIntersect.** The shim refused `BrepIntersect` on a B-rep with
+  faces (`-3`, "the Rust side defers"). Once the Rust FaceIntersect ran, the 10
+  `*_brep_intersect` cases failed (cpp status only, rust curves). The shim now runs
+  upstream's `BrepIntersect`, and the Rust side intersects the B-rep with itself (as the
+  shim does), not with a clone. 20 of 21 pass; 1 defers (`topology.face_p2`).
+- **Still deferred (dispatch gaps, not unported):**
+  - `intersect.topology_solver_p2`: 4 cases at `SmFace::PointClassify`. The solver's
+    `TopologyObjects` cannot resolve the face handle (`intersect/topology_solver/p1.rs`
+    `face_point_classify`).
+  - `boolean.merge_p4`: 66 cases (and `boolean.merge_p3` 4) moved from
+    `SmEdge::GetTolerance` to `SmFace::PointClassify`. The merge arena-pair adapter
+    (`boolean/merge/p4/arena_pair.rs`) now reaches the face queries but cannot resolve
+    the face handle or a classified entity for `PointClassify` (`unresolved_uv` in
+    `intersect/curve_class/p7.rs`). That file is in an open PR, so it is left for a
+    follow-up.
+## boolean.api_brep: the merge cannot ray-fire through a created operand (2026-10-24)
+
+- **What.** The `boolean.api_brep` runner now builds its operands with the ported
+  `SmApiCreateBox` / `SmApiCreateSphere` (`primitive::api_primitives`), as the shim does,
+  instead of empty stand-ins. Two cases disagree. In both, the second operand lies entirely
+  inside the first, so no face intersects:
+
+| case | inputs | record (faces edges vertices regions) |
+|---|---|---|
+| `census_difference_cavity` (TestSmBrep.cpp:3309) | box (0,0,0) 10x10x10 minus box (3,3,3) 4x4x4 | cpp 12 24 16 3, rust 6 12 8 2 |
+| `gen0220` | sphere c=(0.00716,1.07511,0.84640) r=1.37304 minus box (-0.56173,1.02171,-0.07353) 1.00673x0.54777x1.47193 | cpp 7 13 10 3, rust 1 1 2 2 |
+
+- **Cause (port instrumented, not committed).** `boolean::merge::p4::classify_remaining`
+  classifies each unintersected face set with `BrepQuery::default()`. That query keys the
+  cache by `brep_cache::arena_identity`, and `make_brep_cache` adds a face's surface only
+  when `surface.owner() == keys(Face)`. The primitive constructors own their face surfaces
+  under the `topology::loopuse::notify_ref` scheme instead (`type 16002`, key
+  `1 + (4 << 32) + index`, set by `SetSurface` through the creation's `NotifyEnv`). So the
+  cache holds no surfaces, every ray from a point inside the box finds no hit, and
+  `RayFire` answers the infinite region. The cavity's faces are then deleted instead of
+  kept. A fresh `BrepQuery::default().point_3d_classify` on a created box puts (5,5,5) in
+  the infinite region too. Imported B-reps (every other merge runner) own their geometry
+  under `arena_identity`, so they never show this.
+- **Scope.** The same assumption is made at every `BrepQuery::default()` in
+  `boolean::merge` (p1, p4, p5). Only the containment cases reach a ray fire here; the
+  intersecting cases classify their faces through the intersection edges.
+- **Fix.** The operands' geometry owners and the merge's query identity must use one
+  scheme: either the primitive constructors own geometry under `arena_identity`, as
+  `BrepIdentity::default` documents for B-reps this crate builds, or the merge keys its
+  queries by the scheme the operands use. Both cases are listed in
+  `crates/difftest/known_mismatches.toml` until then.
+## nlib.srf_offset: extrusion recognition and sliver-span conditioning (issue #471)
+
+Reproduced the SolidCraft shell/3576 geometry using the pinned C++ reference:
+`SmApiCreateTaperExtrude` of the centered 120x80 rectangle, height 40, draft 5 degrees,
+then r4 on all four sloping edges (`SmFilletExecutive`, circular/constant radius,
+default tolerances), and `SmApiShellBrepFull` with distance -2 and the top removed.
+The standalone `fixtures/nlib.srf_offset/issue471-repro.cpp` uses the linker's
+`--wrap=N_SrfOffset` to save the real inputs without changing reference code.
+`issue471.json` preserves the four rounds, including the failing (-x,+y) round.
+
+Both Rust and C++ return success from the offset of that round, despite control
+points reaching approximately 4125.906 mm from the origin (the part is 120 mm wide).
+The C++ shell returns 1001 here (the issue reported a later 1006 failure). With
+`eps=1e-4`, `tol=1e-5`, `d=-2`, the surface is classified as an extrusion, but
+`|AA x NN|=2.1064044121150683e-6` rejects the shortcut; dividing AA by its length
+makes this 5.490920700622231e-8, below `MODEL_TOL=1e-7`.
+
+The free-form path also needs conditioning independently of recognition. It shares
+one sample count between u and v, irrespective of the patch aspect ratio. On this
+captured input the 2.115e-4 sliver is below the existing 5e-5 relative-width cutoff,
+so it initially receives one step, not the roughly 120 described in the issue.
+However, the later total-grid cap raises it back to degree 3. Nearby v extension
+spans cause the same clustering. Thus normalizing the extrusion test alone does
+not address general surfaces or the other rounds whose angular discrepancy is
+above `MODEL_TOL` even after normalization.
+
+Documented opt-in correction (defaults remain the pinned C++ algorithm):
+
+- `OffsetOptions::normalize_extrusion_direction` compares unit directions, and
+  restores the inherited parameter domain on the extrusion result. The original
+  extrusion constructor resets the linear parameter to [0,1], which is unsuitable
+  for evaluating against inherited trim parameters on the captured [19.97,58.34]
+  domain.
+- `OffsetOptions::condition_sampling` computes independent directional sample
+  counts. Its minimum density scales by each span's fraction of the full domain;
+  directional second-derivative estimates retain sampling where a short parameter
+  interval really contains curved geometry. Mixed terms are apportioned by the
+  u/v span ratio. Derivative bounds use `abs(d)` for inward offsets. Grid reduction
+  keeps a one-step sliver at one step and errors if spans/degrees cannot fit the
+  10000-point budget. Inherited fits are checked at the grid points, cell-edge
+  midpoints and centers, refining failing intervals for at most 24 iterations.
+  They reserve a quarter of the tolerance for knot removal and use half the
+  tolerance as the refinement threshold; exhausted budgets return an error.
+  Computed parametrizations reserve half the tolerance for knot removal. No
+  differential-test tolerance is changed.
+- `Surface::offset_with` and `BSplineSurface::approximate_offset_surface_with`
+  expose both flags. The original entry points pass `OffsetOptions::default()`.
+
+Tests exercise synthetic slivers, both parameter directions and offset signs,
+length-independent extrusion recognition and rejection of oblique axes. The
+captured-round tests evaluate interior points of every original span, including
+the tiny extensions and sliver, against `S(u,v) + d*N(u,v)`, require error at most
+1e-5 mm and bounded control nets, and exercise the B-spline wrapper. All four actual
+inputs remain in the ordinary Rust/C++ parity runner with the original defaults.
+
+Limit: the end-to-end shell cannot yet run in Rust: `replace_implicit_offsets`
+still defers on `SmBrep::ReplaceSurface` (`topology.brep_p2`). Its future continuation
+can select these options when calling the B-spline approximation. This change
+corrects the offset approximation; it does not claim that missing shell topology
+has been implemented. Upstream defect: WR-257.
+
+On a 21x21-per-span check of the captured inward offsets, the corrected general
+path has worst errors 2.48e-6, 2.50e-6, 2.48e-6 and 3.21e-6 mm; with extrusion
+recognition enabled the largest is 8.02e-6 mm. The defective default reaches
+33.55 mm error inside the last round's spans. Re-running the standalone reproducer
+preserves all four control nets and u knots exactly, and reproduces the last
+round's complete input and 4125.906 mm net; the other rounds' tiny lower v extension
+bounds can differ in their last bits (at most 7e-20 in the checked run). The saved
+JSON inputs fix every bit for differential testing.

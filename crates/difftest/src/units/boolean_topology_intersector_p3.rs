@@ -33,8 +33,10 @@
 //! for a degenerate curve, `SmFace::GetEdges` (`topology.face_p4`) through the face
 //! classification, `SmBrep::DeleteEdge` (`topology.brep_p4`) when repairing an edge
 //! relation, `CombineCoincidentVertices` (`topology.brep_p5`) when squeezing, the
-//! global point solve of `DropPoint` (`curve.curve_p1`) when relating new edges, and the
-//! topology edits of `MergeClassifications`.
+//! global point solve of `DropPoint` (`curve.curve_p1`) when relating new edges. The
+//! topology edits of `MergeClassifications` (`MergeInterval`, `MergePointClass`) and of
+//! the degenerate curve's `MergeIntoObject` run on the adapter's B-reps
+//! (`MergeIntervalBrep`, implemented by the p1 runner's `Two`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -67,6 +69,7 @@ use solidcore_ffi::units::boolean_topology_intersector_p3::{self as ffi, Op};
 use super::boolean_topology_intersector_p1::{
     brep_block, brep_h, build_failure, eid, fid, flag, harness, hd, path_of, put_h, BrepIn, Hin,
     Two, H, K_BREP, K_EDGE, K_EDGE_CURVE, K_FACE, K_FACE_SURFACE, K_NULL, K_TRIM_CURVE, K_VERTEX,
+    K_VERTEXUSE,
     NULL_DEREF, TI_HANDLE,
 };
 use super::boolean_merge_p1::Canon;
@@ -845,6 +848,34 @@ fn invalid(reason: &'static str) -> SolidError {
 impl IntersectorBrepP3<H> for Two {
     fn surface_face(&self, surface: H) -> solidcore::Result<Option<H>> {
         Ok(face_of_surface(self, surface))
+    }
+
+    fn face_surface_trace_cache(
+        &mut self,
+        k: &Kernel,
+        surface: H,
+    ) -> solidcore::Result<Option<solidcore::surface::surface_cache::SurfaceCache<H>>> {
+        if surface.kind != K_FACE_SURFACE {
+            return Ok(None);
+        }
+        let side = surface.b;
+        let lease = solidcore::query::face::p2::face_surface_cache(
+            k,
+            self.brep_m(surface)?,
+            FaceId::from_index(surface.i),
+        )?;
+        // the cache's objects in this adapter's handles (the B-rep's topology)
+        let mapped = lease.cache.base().map_handles(|e| match e {
+            EntityRef::Vertexuse(vu) => Ok(hd(side, K_VERTEXUSE, vu.index())),
+            e => Two::entity_h(side, e).ok_or_else(|| {
+                SolidError::invalid_input(
+                    "boolean.topology_intersector_p3 runner",
+                    "cache object without a handle",
+                )
+            }),
+        });
+        lease.release();
+        mapped.map(Some)
     }
 
     fn edge_is_manifold(&self, edge: H) -> solidcore::Result<bool> {
